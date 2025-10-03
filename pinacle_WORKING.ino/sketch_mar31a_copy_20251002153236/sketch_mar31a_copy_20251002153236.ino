@@ -13,7 +13,7 @@
 #define I2S_BCLK   26
 #define I2S_LRCK   25
 #define I2S_DATA   23
-#define SWAP_I2S_LR 0
+#define SWAP_I2S_LR 0  // set to 1 if self-test sounds swapped
 
 #define TOUCH_PLAY_L   27  // T7
 #define TOUCH_PLAY_R   14  // T6
@@ -80,10 +80,10 @@ TP tpR   = {TOUCH_PLAY_R,  0, false, 0, 0, 0, 0};
 TP tpUp  = {TOUCH_TUNE_UP, 0, false, 0, 0, 0, 0};
 TP tpDn  = {TOUCH_TUNE_DN, 0, false, 0, 0, 0, 0};
 
-const float NOISE_ALPHA = 0.05f;
-const float ON_K  = 3.8f;
+const float NOISE_ALPHA = 0.02f;
+const float ON_K  = 3.0f;
 const float OFF_K = 1.5f;
-const float EXTRA_BIAS_ON  = 3.0f;
+const float EXTRA_BIAS_ON  = 2.0f;
 const float EXTRA_BIAS_OFF = 1.0f;
 
 const uint32_t TOUCH_ON_DEBOUNCE_MS  = 25;
@@ -258,6 +258,43 @@ void audioInit(){
   lastGoodI2S = millis();
 }
 
+// ---------- Stereo self-test (Left then Right) ----------
+void stereoSelfTest() {
+  const float TAU = 6.28318530718f;
+  const int16_t A = 4000;  // test amplitude
+  int16_t buf[BUF_SAMPLES*2];
+
+  auto play = [&](float fL, float fR, uint32_t ms) {
+    uint32_t start = millis();
+    float phL = 0.0f, phR = 0.0f;
+    while (millis() - start < ms) {
+      for (size_t i = 0; i < BUF_SAMPLES; ++i) {
+        int16_t sL = (fL > 0) ? (int16_t)(A * sinf(phL)) : 0;
+        int16_t sR = (fR > 0) ? (int16_t)(A * sinf(phR)) : 0;
+
+        // Your stream format is I2S_CHANNEL_FMT_RIGHT_LEFT.
+        // Default branch writes R then L. Flip with SWAP_I2S_LR if needed.
+        #if SWAP_I2S_LR
+          buf[2*i + 0] = sL;  // Left first
+          buf[2*i + 1] = sR;  // Right second
+        #else
+          buf[2*i + 0] = sR;  // Right first
+          buf[2*i + 1] = sL;  // Left second
+        #endif
+
+        phL += TAU * fL / SR; if (phL > TAU) phL -= TAU;
+        phR += TAU * fR / SR; if (phR > TAU) phR -= TAU;
+      }
+      size_t w;
+      i2s_write(I2S_NUM_0, buf, sizeof(buf), &w, pdMS_TO_TICKS(50));
+    }
+  };
+
+  // 1s Left only @ 440 Hz, then 1s Right only @ 660 Hz
+  play(440.0f, 0.0f, 1000);
+  play(0.0f, 660.0f, 1000);
+}
+
 // ---------- Touch helpers ----------
 int readTouchRaw(int pin){ return touchRead(pin); }
 
@@ -281,7 +318,7 @@ void touchRecalibrate(){
 }
 
 void updateOneTP(TP& t, int baseline, int raw, uint32_t now, uint32_t &activeStamp){
-  int d = baseline - raw; if (d<0) d=0;
+  int d = baseline - raw; if (d < 0) d = -d;              // <<< magnitude-based
   t.smooth = (1.0f-EMA_ALPHA)*t.smooth + EMA_ALPHA*(float)d;
   if (!t.touched) t.noise = (1.0f-NOISE_ALPHA)*t.noise + NOISE_ALPHA*(float)d;
 
@@ -353,16 +390,16 @@ void controlUpdate(){
   prevRawL  = rawL;  prevRawR  = rawR;
   prevRawUp = rawUp; prevRawDn = rawDn;
 
-  // NOW compute deltas for raw-edge taps
-  int dUpRaw = baselineUp - rawUp; if (dUpRaw < 0) dUpRaw = 0;
-  int dDnRaw = baselineDn - rawDn; if (dDnRaw < 0) dDnRaw = 0;
+  // NOW compute deltas for raw-edge taps (magnitude-based)
+  int dUpRaw = baselineUp - rawUp; if (dUpRaw < 0) dUpRaw = -dUpRaw;
+  int dDnRaw = baselineDn - rawDn; if (dDnRaw < 0) dDnRaw = -dDnRaw;
 
-  // activity stamps (for grace)
+  // activity stamps (magnitude-based)
   static uint32_t lastActiveLms=0, lastActiveRms=0, lastActiveUpms=0, lastActiveDnms=0;
-  if (baselineL - rawL  > 2) lastActiveLms = now;
-  if (baselineR - rawR  > 2) lastActiveRms = now;
-  if (baselineUp - rawUp> 2) lastActiveUpms= now;
-  if (baselineDn - rawDn> 2) lastActiveDnms= now;
+  if ((baselineL - rawL  > 2) || (rawL - baselineL  > 2)) lastActiveLms = now;
+  if ((baselineR - rawR  > 2) || (rawR - baselineR  > 2)) lastActiveRms = now;
+  if ((baselineUp - rawUp> 2) || (rawUp - baselineUp> 2)) lastActiveUpms= now;
+  if ((baselineDn - rawDn> 2) || (rawDn - baselineDn> 2)) lastActiveDnms= now;
 
   // update smoothed states
   updateOneTP(tpL,  baselineL, rawL,  now, lastActiveLms);
@@ -419,9 +456,9 @@ void controlUpdate(){
       if (uiMode != MODE_TUNE) {
         uiMode = MODE_TUNE;
         lastTuneTapMs = now;                       // avoid instant auto-exit
-        // seed raw-edge states so the first tap is clean
-        int seedUp = baselineUp - readTouchRaw(TOUCH_TUNE_UP); if (seedUp < 0) seedUp = 0;
-        int seedDn = baselineDn - readTouchRaw(TOUCH_TUNE_DN); if (seedDn < 0) seedDn = 0;
+        // seed raw-edge states so the first tap is clean (magnitude-based)
+        int seedUp = baselineUp - readTouchRaw(TOUCH_TUNE_UP); if (seedUp < 0) seedUp = -seedUp;
+        int seedDn = baselineDn - readTouchRaw(TOUCH_TUNE_DN); if (seedDn < 0) seedDn = -seedDn;
         prevTapUp = (seedUp > RAW_TAP_THRESH);
         prevTapDn = (seedDn > RAW_TAP_THRESH);
         Serial.printf("[ui] TUNE MODE (steady tone at %.2f Hz). Tap UP/DN to adjust; idle 5s to exit.\n", baseAHz);
@@ -483,8 +520,8 @@ void controlUpdate(){
   // ---- Debug ----
   if (now - lastDbg > 500){
     lastDbg = now;
-    int dbgUp = baselineUp - rawUp; if (dbgUp < 0) dbgUp = 0;
-    int dbgDn = baselineDn - rawDn; if (dbgDn < 0) dbgDn = 0;
+    int dbgUp = baselineUp - rawUp; if (dbgUp < 0) dbgUp = -dbgUp;
+    int dbgDn = baselineDn - rawDn; if (dbgDn < 0) dbgDn = -dbgDn;
     Serial.printf("[dbg] rawL:%d rawR:%d rawUp:%d rawDn:%d | baseL:%d baseR:%d baseUp:%d baseDn:%d\n",
                   rawL, rawR, rawUp, rawDn, baselineL, baselineR, baselineUp, baselineDn);
     Serial.printf("[dbg] L:%d R:%d Up:%d Dn:%d | smL=%.1f smR=%.1f smUp=%.1f smDn=%.1f | dUp=%d dDn=%d | fL=%.1f fR=%.1f | mode=%d\n",
@@ -498,6 +535,7 @@ void setup(){
   Serial.begin(115200);
   audioInit();
   buildScaleHz();
+  stereoSelfTest();  // Left then Right
   lastInputMs = lastControlMs = millis();
 }
 
@@ -560,13 +598,15 @@ void loop(){
     if (injectKA && curFreqL<=0.0f) sL = (int16_t)((((int32_t)(esp_random()&0x7FFF))-16384) >> KA_SHIFT);
     if (injectKA && curFreqR<=0.0f) sR = (int16_t)((((int32_t)(esp_random()&0x7FFF))-16384) >> KA_SHIFT);
 
-#if SWAP_I2S_LR
-    buf[2*i+0] = (int16_t)clampf(sL, -32767.f, 32767.f);
-    buf[2*i+1] = (int16_t)clampf(sR, -32767.f, 32767.f);
-#else
-    buf[2*i+0] = (int16_t)clampf(sR, -32767.f, 32767.f);
-    buf[2*i+1] = (int16_t)clampf(sL, -32767.f, 32767.f);
-#endif
+    // buffer order: respects I2S_CHANNEL_FMT_RIGHT_LEFT
+    #if SWAP_I2S_LR
+      buf[2*i+0] = (int16_t)clampf(sL, -32767.f, 32767.f);
+      buf[2*i+1] = (int16_t)clampf(sR, -32767.f, 32767.f);
+    #else
+      buf[2*i+0] = (int16_t)clampf(sR, -32767.f, 32767.f);
+      buf[2*i+1] = (int16_t)clampf(sL, -32767.f, 32767.f);
+    #endif
+
     phaseL += dphiL; if (phaseL > TAU) phaseL -= TAU;
     phaseR += dphiR; if (phaseR > TAU) phaseR -= TAU;
     vibPhaseL += vibInc; if (vibPhaseL > TAU) vibPhaseL -= TAU;

@@ -80,10 +80,10 @@ TP tpR   = {TOUCH_PLAY_R,  0, false, 0, 0, 0, 0};
 TP tpUp  = {TOUCH_TUNE_UP, 0, false, 0, 0, 0, 0};
 TP tpDn  = {TOUCH_TUNE_DN, 0, false, 0, 0, 0, 0};
 
-const float NOISE_ALPHA = 0.05f;
-const float ON_K  = 3.8f;
+const float NOISE_ALPHA = 0.02f;
+const float ON_K  = 3.0f;
 const float OFF_K = 1.5f;
-const float EXTRA_BIAS_ON  = 3.0f;
+const float EXTRA_BIAS_ON  = 2.0f;
 const float EXTRA_BIAS_OFF = 1.0f;
 
 const uint32_t TOUCH_ON_DEBOUNCE_MS  = 25;
@@ -496,6 +496,7 @@ void controlUpdate(){
 // ---------- Arduino ----------
 void setup(){
   Serial.begin(115200);
+  Serial.println("\n[DEBUG] ESP32 booting up...");
   audioInit();
   buildScaleHz();
   lastInputMs = lastControlMs = millis();
